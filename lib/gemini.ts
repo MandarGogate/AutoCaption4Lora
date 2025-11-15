@@ -12,7 +12,6 @@ interface CaptionOptions {
   keyword: string;
   captionGuidance: string;
   checkpoint: string;
-  guidanceStrength: number;
   negativeHints: string;
   captionLength: string;
   strictFocus: boolean;

@@ -1,21 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import { store } from "@/lib/store";
 import { generateCaption } from "@/lib/gemini";
+import { generateCaptionOpenAI } from "@/lib/providers";
 
 export async function POST(request: NextRequest) {
   try {
     const formData = await request.formData();
 
-    const geminiModel = formData.get("geminiModel") as string || "gemini-1.5-flash-latest";
-    const trainingGoal = formData.get("trainingGoal") as string;
+    const provider = (formData.get("provider") as string) || "gemini";
+    const modelName = formData.get("modelName") as string || "gemini-1.5-flash-latest";
     const prefix = formData.get("prefix") as string;
     const keyword = formData.get("keyword") as string;
     const checkpoint = formData.get("checkpoint") as string;
     const captionGuidance = formData.get("captionGuidance") as string || "";
-    const guidanceStrength = parseFloat(formData.get("guidanceStrength") as string);
     const negativeHints = formData.get("negativeHints") as string || "";
     const captionLength = formData.get("captionLength") as string;
-    const negativePreset = formData.get("negativePreset") as string;
     const strictFocus = formData.get("strictFocus") === "true";
 
     const uploadedImages = store.getUploadedImages();
@@ -29,8 +28,8 @@ export async function POST(request: NextRequest) {
 
     store.addLog("========================================");
     store.addLog("Starting new run...");
-    store.addLog(`Gemini Model: ${geminiModel}`);
-    store.addLog(`Use case: ${trainingGoal}`);
+    store.addLog(`Provider: ${provider}`);
+    store.addLog(`Model: ${modelName}`);
     store.addLog(`Target Base Model: ${checkpoint}`);
     store.addLog(`Found ${uploadedImages.size} images. Processing...`);
 
@@ -48,15 +47,27 @@ export async function POST(request: NextRequest) {
       store.addLog(`Processing ${idx}/${uploadedImages.size}...`);
 
       try {
-        const caption = await generateCaption(imageBuffer, {
-          keyword,
-          captionGuidance,
-          checkpoint,
-          guidanceStrength,
-          negativeHints,
-          captionLength,
-          strictFocus,
-        }, geminiModel);
+        let caption: string;
+
+        if (provider === "gemini") {
+          caption = await generateCaption(imageBuffer, {
+            keyword,
+            captionGuidance,
+            checkpoint,
+            negativeHints,
+            captionLength,
+            strictFocus,
+          }, modelName);
+        } else {
+          caption = await generateCaptionOpenAI(imageBuffer, {
+            keyword,
+            captionGuidance,
+            checkpoint,
+            negativeHints,
+            captionLength,
+            strictFocus,
+          }, provider, modelName);
+        }
 
         const newFilename = `${prefix}_${idx.toString().padStart(5, "0")}.jpg`;
         processedResults.push({

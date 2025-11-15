@@ -14,3 +14,13 @@ export async function GET() {
     return new NextResponse("Error fetching logs", { status: 500 });
   }
 }
+
+export async function DELETE() {
+  try {
+    store.clearLogs();
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    console.error("Clear logs error:", error);
+    return NextResponse.json({ error: "Error clearing logs" }, { status: 500 });
+  }
+}

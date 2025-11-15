@@ -1,12 +1,12 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect } from "react";
-import { Upload, Download, Loader2, Grid3x3, CheckCircle2, Clock, AlertCircle } from "lucide-react";
+import { Upload, Download, Loader2, Sparkles, CheckCircle2, Clock, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -31,6 +31,14 @@ interface GeminiModel {
   outputTokenLimit: number;
 }
 
+interface Provider {
+  id: string;
+  name: string;
+  requiresApiKey: boolean;
+  isAvailable: boolean;
+  models: string[];
+}
+
 export default function Home() {
   const [imageFiles, setImageFiles] = useState<ImageFile[]>([]);
   const [isDragging, setIsDragging] = useState(false);
@@ -40,19 +48,23 @@ export default function Home() {
   const [canDownload, setCanDownload] = useState(false);
   const [availableModels, setAvailableModels] = useState<GeminiModel[]>([]);
   const [isLoadingModels, setIsLoadingModels] = useState(true);
+  const [providers, setProviders] = useState<Provider[]>([]);
+  const [selectedProvider, setSelectedProvider] = useState("gemini");
+  const [providerModels, setProviderModels] = useState<string[]>([]);
 
   // Form state
   const [geminiModel, setGeminiModel] = useState("");
-  const [trainingGoal, setTrainingGoal] = useState("Identity");
-  const [prefix, setPrefix] = useState("Audrey");
-  const [keyword, setKeyword] = useState("audr3yHepburn1");
+  const [prefix, setPrefix] = useState("");
+  const [keyword, setKeyword] = useState("");
   const [checkpoint, setCheckpoint] = useState("WAN-2.2");
   const [captionGuidance, setCaptionGuidance] = useState("");
-  const [guidanceStrength, setGuidanceStrength] = useState([0.8]);
   const [negativeHints, setNegativeHints] = useState("");
   const [captionLength, setCaptionLength] = useState("Medium");
-  const [negativePreset, setNegativePreset] = useState("Auto");
   const [strictFocus, setStrictFocus] = useState(false);
+
+  // Validation errors
+  const [prefixError, setPrefixError] = useState(false);
+  const [keywordError, setKeywordError] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -142,6 +154,30 @@ export default function Home() {
       return;
     }
 
+    // Reset error states
+    setPrefixError(false);
+    setKeywordError(false);
+
+    // Validate required fields
+    let hasError = false;
+    if (!prefix.trim()) {
+      setPrefixError(true);
+      setLogs("Error: File prefix is required. Please enter a file prefix.");
+      hasError = true;
+    }
+
+    if (!keyword.trim()) {
+      setKeywordError(true);
+      if (!hasError) {
+        setLogs("Error: Keyword is required. Please enter a keyword.");
+      }
+      hasError = true;
+    }
+
+    if (hasError) {
+      return;
+    }
+
     setIsProcessing(true);
     setLogs("Processing images... This may take a while.");
     setCanDownload(false);
@@ -152,16 +188,14 @@ export default function Home() {
     );
 
     const formData = new FormData();
-    formData.append("geminiModel", geminiModel);
-    formData.append("trainingGoal", trainingGoal);
+    formData.append("provider", selectedProvider);
+    formData.append("modelName", geminiModel);
     formData.append("prefix", prefix);
     formData.append("keyword", keyword);
     formData.append("checkpoint", checkpoint);
     formData.append("captionGuidance", captionGuidance);
-    formData.append("guidanceStrength", guidanceStrength[0].toString());
     formData.append("negativeHints", negativeHints);
     formData.append("captionLength", captionLength);
-    formData.append("negativePreset", negativePreset);
     formData.append("strictFocus", strictFocus.toString());
 
     try {
@@ -200,34 +234,80 @@ export default function Home() {
     window.location.href = "/api/download";
   };
 
-  // Fetch available models on mount
+  // Fetch available providers on mount
   useEffect(() => {
-    const fetchModels = async () => {
+    const fetchProviders = async () => {
       try {
-        const response = await fetch("/api/models");
+        const response = await fetch("/api/providers");
         const data = await response.json();
 
-        if (data.models && data.models.length > 0) {
-          setAvailableModels(data.models);
+        if (data.providers && data.providers.length > 0) {
+          setProviders(data.providers);
 
-          // Try to find and set Gemini 2.5 Flash as default
-          const preferred = data.models.find((m: GeminiModel) =>
-            m.name.includes("gemini-2.0-flash-exp") ||
-            m.name.includes("gemini-2.5-flash") ||
-            m.displayName.toLowerCase().includes("2.5 flash")
-          );
-
-          setGeminiModel(preferred?.name || data.models[0].name);
+          // Find first available provider or default to gemini
+          const availableProvider = data.providers.find((p: Provider) => p.isAvailable);
+          if (availableProvider) {
+            setSelectedProvider(availableProvider.id);
+          }
         }
       } catch (error) {
-        console.error("Error fetching models:", error);
-      } finally {
-        setIsLoadingModels(false);
+        console.error("Error fetching providers:", error);
       }
     };
 
-    fetchModels();
+    // Clear old logs on mount
+    const clearOldLogs = async () => {
+      try {
+        await fetch("/api/logs", { method: "DELETE" });
+        setLogs("Waiting for images...");
+      } catch (error) {
+        console.error("Error clearing logs:", error);
+      }
+    };
+
+    fetchProviders();
+    clearOldLogs();
   }, []);
+
+  // Fetch Gemini models dynamically when Gemini is selected
+  useEffect(() => {
+    if (selectedProvider === "gemini") {
+      const fetchGeminiModels = async () => {
+        setIsLoadingModels(true);
+        try {
+          const response = await fetch("/api/models");
+          const data = await response.json();
+
+          if (data.models && data.models.length > 0) {
+            setAvailableModels(data.models);
+
+            // Try to find and set Gemini 2.5 Flash as default
+            const preferred = data.models.find((m: GeminiModel) =>
+              m.name.includes("gemini-2.0-flash-exp") ||
+              m.name.includes("gemini-2.5-flash") ||
+              m.displayName.toLowerCase().includes("2.5 flash")
+            );
+
+            setGeminiModel(preferred?.name || data.models[0].name);
+          }
+        } catch (error) {
+          console.error("Error fetching Gemini models:", error);
+        } finally {
+          setIsLoadingModels(false);
+        }
+      };
+
+      fetchGeminiModels();
+    } else {
+      // For other providers, use static model list
+      const provider = providers.find((p) => p.id === selectedProvider);
+      if (provider && provider.models.length > 0) {
+        setProviderModels(provider.models);
+        setGeminiModel(provider.models[0]);
+        setIsLoadingModels(false);
+      }
+    }
+  }, [selectedProvider, providers]);
 
   // Poll for logs
   useEffect(() => {
@@ -256,17 +336,17 @@ export default function Home() {
   return (
     <div className="flex h-screen bg-gradient-to-br from-background via-background to-background/95">
         {/* Left Sidebar */}
-        <div className="w-[380px] bg-card/50 backdrop-blur-xl border-r border-border/50 overflow-y-auto shadow-2xl custom-scrollbar">
+        <div className="w-[480px] bg-card/50 backdrop-blur-xl border-r border-border/50 overflow-y-auto shadow-2xl custom-scrollbar">
           {/* Header */}
           <div className="p-6 border-b border-border/50 bg-gradient-to-r from-primary/10 via-primary/5 to-transparent">
             <div className="flex items-center gap-3">
               <div className="p-2 bg-primary/10 rounded-lg shadow-lg shadow-primary/20">
-                <Grid3x3 className="h-6 w-6 text-primary" />
+                <Sparkles className="h-6 w-6 text-primary" />
               </div>
               <div className="flex-1">
-                <h1 className="text-xl font-bold bg-gradient-to-r from-foreground to-foreground/70 bg-clip-text text-transparent">LORA Helper</h1>
-                <Badge variant="secondary" className="mt-1 text-[10px]">v2.0</Badge>
+                <h1 className="text-xl font-bold bg-gradient-to-r from-foreground to-foreground/70 bg-clip-text text-transparent">AutoCaption4Lora</h1>
               </div>
+              <ThemeToggle />
             </div>
           </div>
 
@@ -283,36 +363,52 @@ export default function Home() {
             <div className="space-y-4">
               <div>
                 <Label htmlFor="service">Service</Label>
-                <Select defaultValue="gemini">
+                <Select value={selectedProvider} onValueChange={setSelectedProvider}>
                   <SelectTrigger id="service" className="mt-2">
-                    <SelectValue />
+                    <SelectValue placeholder="Select provider" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="gemini">Google Gemini</SelectItem>
+                    {providers.map((provider) => (
+                      <SelectItem
+                        key={provider.id}
+                        value={provider.id}
+                        disabled={!provider.isAvailable}
+                      >
+                        {provider.name} {!provider.isAvailable && "(API key required)"}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
 
               <div>
                 <Label htmlFor="gemini-model">Model</Label>
-                <Select value={geminiModel} onValueChange={setGeminiModel} disabled={isLoadingModels || availableModels.length === 0}>
+                <Select value={geminiModel} onValueChange={setGeminiModel} disabled={isLoadingModels}>
                   <SelectTrigger id="gemini-model" className="mt-2">
                     <SelectValue placeholder={isLoadingModels ? "Loading models..." : "Select a model"} />
                   </SelectTrigger>
                   <SelectContent>
-                    {availableModels.map((model) => (
-                      <SelectItem key={model.name} value={model.name}>
-                        {model.displayName}
-                      </SelectItem>
-                    ))}
+                    {selectedProvider === "gemini" ? (
+                      availableModels.map((model) => (
+                        <SelectItem key={model.name} value={model.name}>
+                          {model.displayName}
+                        </SelectItem>
+                      ))
+                    ) : (
+                      providerModels.map((modelName) => (
+                        <SelectItem key={modelName} value={modelName}>
+                          {modelName}
+                        </SelectItem>
+                      ))
+                    )}
                   </SelectContent>
                 </Select>
-                {geminiModel && availableModels.find(m => m.name === geminiModel) && (
+                {selectedProvider === "gemini" && geminiModel && availableModels.find(m => m.name === geminiModel) && (
                   <p className="text-xs text-muted-foreground mt-2">
                     {availableModels.find(m => m.name === geminiModel)?.description || ""}
                   </p>
                 )}
-                {!isLoadingModels && availableModels.length === 0 && (
+                {!isLoadingModels && selectedProvider === "gemini" && availableModels.length === 0 && (
                   <p className="text-xs text-red-400 mt-2">
                     Failed to load models. Check your API key.
                   </p>
@@ -347,41 +443,33 @@ export default function Home() {
               </h2>
             </div>
             <div className="space-y-4">
-              <div>
-                <Label htmlFor="training-goal">Training Goal</Label>
-                <Select
-                  value={trainingGoal}
-                  onValueChange={setTrainingGoal}
-                >
-                  <SelectTrigger id="training-goal" className="mt-2">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="Identity">Identity</SelectItem>
-                    <SelectItem value="Style">Style</SelectItem>
-                    <SelectItem value="Object">Object</SelectItem>
-                    <SelectItem value="Concept">Concept</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <Label htmlFor="prefix">File prefix</Label>
+                  <Label htmlFor="prefix">File prefix <span className="text-destructive">*</span></Label>
                   <Input
                     id="prefix"
                     value={prefix}
-                    onChange={(e) => setPrefix(e.target.value)}
-                    className="mt-2"
+                    onChange={(e) => {
+                      setPrefix(e.target.value);
+                      setPrefixError(false);
+                    }}
+                    placeholder="Required"
+                    className={`mt-2 ${prefixError ? 'border-destructive focus-visible:ring-destructive' : ''}`}
+                    required
                   />
                 </div>
                 <div>
-                  <Label htmlFor="keyword">Keyword</Label>
+                  <Label htmlFor="keyword">Keyword <span className="text-destructive">*</span></Label>
                   <Input
                     id="keyword"
                     value={keyword}
-                    onChange={(e) => setKeyword(e.target.value)}
-                    className="mt-2"
+                    onChange={(e) => {
+                      setKeyword(e.target.value);
+                      setKeywordError(false);
+                    }}
+                    placeholder="Required"
+                    className={`mt-2 ${keywordError ? 'border-destructive focus-visible:ring-destructive' : ''}`}
+                    required
                   />
                 </div>
               </div>
@@ -425,21 +513,6 @@ export default function Home() {
               </div>
 
               <div>
-                <Label htmlFor="guidance-strength">
-                  Guidance Strength: <span className="text-primary font-bold">{guidanceStrength[0]}</span>
-                </Label>
-                <Slider
-                  id="guidance-strength"
-                  value={guidanceStrength}
-                  onValueChange={setGuidanceStrength}
-                  min={0}
-                  max={1}
-                  step={0.1}
-                  className="mt-2"
-                />
-              </div>
-
-              <div>
                 <Label htmlFor="negative-hints">Negative Hints</Label>
                 <Input
                   id="negative-hints"
@@ -450,39 +523,21 @@ export default function Home() {
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <Label htmlFor="caption-length">Caption Length</Label>
-                  <Select
-                    value={captionLength}
-                    onValueChange={setCaptionLength}
-                  >
-                    <SelectTrigger id="caption-length" className="mt-2">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="Short">Short</SelectItem>
-                      <SelectItem value="Medium">Medium</SelectItem>
-                      <SelectItem value="Long">Long</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div>
-                  <Label htmlFor="negative-preset">Negative Preset</Label>
-                  <Select
-                    value={negativePreset}
-                    onValueChange={setNegativePreset}
-                  >
-                    <SelectTrigger id="negative-preset" className="mt-2">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="Auto">Auto</SelectItem>
-                      <SelectItem value="None">None</SelectItem>
-                      <SelectItem value="Custom">Custom</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
+              <div>
+                <Label htmlFor="caption-length">Caption Length</Label>
+                <Select
+                  value={captionLength}
+                  onValueChange={setCaptionLength}
+                >
+                  <SelectTrigger id="caption-length" className="mt-2">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="Short">Short</SelectItem>
+                    <SelectItem value="Medium">Medium</SelectItem>
+                    <SelectItem value="Long">Long</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
 
               <div className="flex items-center justify-between p-4 rounded-lg bg-primary/5 border border-primary/10 hover:bg-primary/10 transition-all">
