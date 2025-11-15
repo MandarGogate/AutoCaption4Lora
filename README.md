@@ -36,7 +36,7 @@
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/yourusername/AutoCaption4Lora.git
+   git clone https://github.com/MandarGogate/AutoCaption4Lora.git
    cd AutoCaption4Lora
    ```
 
@@ -163,7 +163,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 📞 Support
 
 If you encounter any issues or have questions:
-- Open an [issue](https://github.com/yourusername/AutoCaption4Lora/issues)
+- Open an [issue](https://github.com/MandarGogate/AutoCaption4Lora/issues)
 - Star ⭐ this repository if you find it helpful!
 
 ---
