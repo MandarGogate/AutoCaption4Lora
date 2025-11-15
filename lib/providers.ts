@@ -1,4 +1,8 @@
 // LLM Provider configurations and integrations
+import { ErrorHandler, TimeoutController } from "./errors";
+
+// Configuration constants
+const API_TIMEOUT_MS = 30000; // 30 seconds per request
 
 export interface LLMProvider {
   id: string;
@@ -137,43 +141,54 @@ export async function generateCaptionOpenAI(
   const mimeType = "image/jpeg"; // Assume JPEG, could be detected
 
   try {
-    const response = await fetch(`${providerConfig.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`,
-        ...(provider === "openrouter" && {
-          "HTTP-Referer": "https://github.com/MandarGogate/AutoCaption4Lora",
-          "X-Title": "AutoCaption4Lora",
-        }),
-      },
-      body: JSON.stringify({
-        model: modelName,
-        messages: [
-          {
-            role: "user",
-            content: [
-              { type: "text", text: prompt },
+    // Use timeout wrapper with AbortSignal for fetch requests
+    const response = await TimeoutController.withAbortSignal(
+      async (signal) => {
+        return fetch(`${providerConfig.baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${apiKey}`,
+            ...(provider === "openrouter" && {
+              "HTTP-Referer": "https://github.com/MandarGogate/AutoCaption4Lora",
+              "X-Title": "AutoCaption4Lora",
+            }),
+          },
+          body: JSON.stringify({
+            model: modelName,
+            messages: [
               {
-                type: "image_url",
-                image_url: {
-                  url: `data:${mimeType};base64,${imageBase64}`,
-                },
+                role: "user",
+                content: [
+                  { type: "text", text: prompt },
+                  {
+                    type: "image_url",
+                    image_url: {
+                      url: `data:${mimeType};base64,${imageBase64}`,
+                    },
+                  },
+                ],
               },
             ],
-          },
-        ],
-        max_tokens: 300,
-      }),
-    });
+            max_tokens: 300,
+          }),
+          signal,
+        });
+      },
+      API_TIMEOUT_MS
+    );
 
     if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`API request failed: ${response.status} - ${error}`);
+      const errorText = await response.text();
+      throw new Error(`API request failed: ${response.status} - ${errorText}`);
     }
 
     const data = await response.json();
     const rawDesc = data.choices[0]?.message?.content?.trim() || "";
+
+    if (!rawDesc) {
+      throw new Error("Empty response from API");
+    }
 
     // Build final caption with keyword
     return buildCaption(
@@ -183,10 +198,25 @@ export async function generateCaptionOpenAI(
       options.negativeHints
     );
   } catch (error: any) {
-    console.error(`Error with ${provider}:`, error);
+    // Use centralized error handler for better error messages
+    const appError = ErrorHandler.fromException(error, `${providerConfig.name} API`);
+    console.error(ErrorHandler.formatErrorForLog(appError, "generateCaptionOpenAI"));
 
-    if (error.message?.includes("429")) {
+    // Return user-friendly error caption
+    if (appError.code === "RATE_LIMIT_EXCEEDED") {
       return `${options.keyword}, rate limit exceeded, please retry`;
+    } else if (appError.code === "REQUEST_TIMEOUT") {
+      return `${options.keyword}, request timed out after ${API_TIMEOUT_MS / 1000}s`;
+    } else if (appError.code === "NETWORK_ERROR") {
+      return `${options.keyword}, network error, check connection`;
+    } else if (appError.code === "API_KEY_INVALID") {
+      return `${options.keyword}, API key invalid or unauthorized`;
+    } else if (appError.code === "API_KEY_MISSING") {
+      return `${options.keyword}, API key not configured`;
+    } else if (appError.code === "CONTENT_FILTERED") {
+      return `${options.keyword}, content filtered by safety settings`;
+    } else if (appError.code === "PROVIDER_UNAVAILABLE") {
+      return `${options.keyword}, provider temporarily unavailable`;
     }
 
     return `${options.keyword}, image description unavailable`;

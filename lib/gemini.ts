@@ -1,9 +1,22 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { configValidator } from "./config";
+import { ErrorHandler, TimeoutController } from "./errors";
+
+// Configuration constants
+const API_TIMEOUT_MS = 30000; // 30 seconds per request
 
 const apiKey = process.env.GEMINI_API_KEY;
 
 if (!apiKey) {
+  console.error("GEMINI_API_KEY environment variable is not set");
+  console.error("Please check your .env file and ensure GEMINI_API_KEY is configured.");
   throw new Error("GEMINI_API_KEY environment variable is not set");
+}
+
+if (apiKey === "your_gemini_api_key_here") {
+  console.error("GEMINI_API_KEY is set to placeholder value");
+  console.error("Please update your .env file with your actual Gemini API key.");
+  throw new Error("GEMINI_API_KEY is not properly configured");
 }
 
 const genAI = new GoogleGenerativeAI(apiKey);
@@ -57,15 +70,20 @@ export async function generateCaption(
     // Convert buffer to base64
     const imageBase64 = imageBuffer.toString("base64");
 
-    const result = await model.generateContent([
-      { text: prompt },
-      {
-        inlineData: {
-          mimeType: "image/jpeg",
-          data: imageBase64,
+    // Wrap the API call with timeout protection
+    const result = await TimeoutController.withTimeout(
+      model.generateContent([
+        { text: prompt },
+        {
+          inlineData: {
+            mimeType: "image/jpeg",
+            data: imageBase64,
+          },
         },
-      },
-    ]);
+      ]),
+      API_TIMEOUT_MS,
+      `Gemini API request for model ${modelName}`
+    );
 
     const response = await result.response;
 
@@ -95,13 +113,21 @@ export async function generateCaption(
 
     return finalCaption;
   } catch (error: any) {
-    console.error("Error generating caption:", error);
+    // Use centralized error handler for better error messages
+    const appError = ErrorHandler.fromException(error, "Gemini API");
+    console.error(ErrorHandler.formatErrorForLog(appError, "generateCaption"));
 
-    // Provide more specific error messages
-    if (error.message?.includes("PROHIBITED_CONTENT") || error.message?.includes("SAFETY")) {
+    // Return user-friendly error caption
+    if (appError.code === "CONTENT_FILTERED") {
       return `${options.keyword}, content filtered by safety settings`;
-    } else if (error.message?.includes("429")) {
+    } else if (appError.code === "RATE_LIMIT_EXCEEDED") {
       return `${options.keyword}, rate limit exceeded, please retry`;
+    } else if (appError.code === "REQUEST_TIMEOUT") {
+      return `${options.keyword}, request timed out after ${API_TIMEOUT_MS / 1000}s`;
+    } else if (appError.code === "NETWORK_ERROR") {
+      return `${options.keyword}, network error, check connection`;
+    } else if (appError.code === "API_KEY_INVALID") {
+      return `${options.keyword}, API key invalid or unauthorized`;
     }
 
     return `${options.keyword}, image description unavailable`;

@@ -1,6 +1,15 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+import { ErrorHandler } from "@/lib/errors";
+import { TimeoutController } from "@/lib/errors";
+import { rateLimit, RateLimitPresets } from "@/lib/rate-limit";
 
-export async function GET() {
+const API_TIMEOUT_MS = 10000; // 10 seconds for model listing
+
+export async function GET(request: NextRequest) {
+  // Apply rate limiting
+  const rateLimitResult = await rateLimit(request, RateLimitPresets.RELAXED);
+  if (rateLimitResult) return rateLimitResult;
+
   try {
     const apiKey = process.env.GEMINI_API_KEY;
 
@@ -11,9 +20,20 @@ export async function GET() {
       });
     }
 
-    // Fetch models directly from REST API
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`
+    // Fetch models with timeout protection
+    const response = await TimeoutController.withAbortSignal(
+      async (signal) => {
+        return fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models`,
+          {
+            headers: {
+              'x-goog-api-key': apiKey,
+            },
+            signal,
+          }
+        );
+      },
+      API_TIMEOUT_MS
     );
 
     if (!response.ok) {
@@ -49,10 +69,14 @@ export async function GET() {
       count: visionModels.length,
     });
   } catch (error: any) {
-    console.error("Error fetching models:", error);
+    const appError = ErrorHandler.fromException(error, "Gemini models API");
+    console.error(ErrorHandler.formatErrorForLog(appError, "GET /api/models"));
+
     return NextResponse.json({
-      error: error.message || "Failed to fetch models",
+      error: appError.message,
+      code: appError.code,
+      suggestion: appError.suggestion,
       models: [],
-    });
+    }, { status: appError.statusCode });
   }
 }

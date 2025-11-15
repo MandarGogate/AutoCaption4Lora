@@ -1,7 +1,15 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { LLM_PROVIDERS } from "@/lib/providers";
+import { ErrorHandler, TimeoutController } from "@/lib/errors";
+import { rateLimit, RateLimitPresets } from "@/lib/rate-limit";
 
-export async function GET() {
+const API_TIMEOUT_MS = 10000; // 10 seconds for provider info
+
+export async function GET(request: NextRequest) {
+  // Apply rate limiting
+  const rateLimitResult = await rateLimit(request, RateLimitPresets.RELAXED);
+  if (rateLimitResult) return rateLimitResult;
+
   try {
     // Build list of available providers
     const availableProviders = [];
@@ -22,10 +30,21 @@ export async function GET() {
 
     // Fetch Gemini models dynamically if available
     const geminiApiKey = process.env.GEMINI_API_KEY;
-    if (geminiApiKey) {
+    if (geminiApiKey && geminiApiKey !== "your_gemini_api_key_here") {
       try {
-        const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models?key=${geminiApiKey}`
+        const response = await TimeoutController.withAbortSignal(
+          async (signal) => {
+            return fetch(
+              `https://generativelanguage.googleapis.com/v1beta/models`,
+              {
+                headers: {
+                  'x-goog-api-key': geminiApiKey,
+                },
+                signal,
+              }
+            );
+          },
+          API_TIMEOUT_MS
         );
 
         if (response.ok) {
@@ -44,15 +63,18 @@ export async function GET() {
         }
       } catch (error) {
         console.error("Failed to fetch Gemini models:", error);
+        // Continue without dynamic models
       }
     }
 
     return NextResponse.json({ providers: availableProviders });
   } catch (error) {
-    console.error("Error fetching providers:", error);
+    const appError = ErrorHandler.fromException(error, "Providers API");
+    console.error(ErrorHandler.formatErrorForLog(appError, "GET /api/providers"));
+
     return NextResponse.json(
-      { error: "Failed to fetch providers" },
-      { status: 500 }
+      ErrorHandler.formatErrorForResponse(appError),
+      { status: appError.statusCode }
     );
   }
 }

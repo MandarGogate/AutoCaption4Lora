@@ -20,17 +20,58 @@ if (!fs.existsSync(PROCESSED_DIR)) {
   fs.mkdirSync(PROCESSED_DIR, { recursive: true });
 }
 
+// Helper function to validate paths and prevent directory traversal
+function validatePath(baseDir: string, filename: string): string {
+  const safePath = path.join(baseDir, path.basename(filename));
+  const resolvedPath = path.resolve(safePath);
+  const resolvedBaseDir = path.resolve(baseDir);
+
+  if (!resolvedPath.startsWith(resolvedBaseDir)) {
+    throw new Error("Invalid file path: directory traversal detected");
+  }
+
+  return safePath;
+}
+
 class Store {
-  setUploadedImages(images: Map<string, Buffer>) {
-    // Clear old uploads
-    const files = fs.readdirSync(UPLOAD_DIR);
-    files.forEach((file) => {
-      fs.unlinkSync(path.join(UPLOAD_DIR, file));
+  private lockPromise: Promise<void> | null = null;
+
+  // Atomic lock mechanism to prevent race conditions
+  private async acquireLock(): Promise<() => void> {
+    // Wait for any existing lock to be released
+    while (this.lockPromise !== null) {
+      await this.lockPromise;
+    }
+
+    // Create a new lock promise
+    let releaseLock: () => void;
+    this.lockPromise = new Promise<void>((resolve) => {
+      releaseLock = resolve;
     });
 
-    // Save new uploads
-    for (const [filename, buffer] of images.entries()) {
-      fs.writeFileSync(path.join(UPLOAD_DIR, filename), buffer);
+    // Return the release function
+    return () => {
+      this.lockPromise = null;
+      releaseLock!();
+    };
+  }
+  async setUploadedImages(images: Map<string, Buffer>): Promise<void> {
+    const release = await this.acquireLock();
+    try {
+      // Clear old uploads
+      const files = fs.readdirSync(UPLOAD_DIR);
+      files.forEach((file) => {
+        const safePath = validatePath(UPLOAD_DIR, file);
+        fs.unlinkSync(safePath);
+      });
+
+      // Save new uploads
+      for (const [filename, buffer] of images.entries()) {
+        const safePath = validatePath(UPLOAD_DIR, filename);
+        fs.writeFileSync(safePath, buffer);
+      }
+    } finally {
+      release();
     }
   }
 
@@ -39,30 +80,35 @@ class Store {
     const files = fs.readdirSync(UPLOAD_DIR);
 
     for (const filename of files) {
-      const buffer = fs.readFileSync(path.join(UPLOAD_DIR, filename));
+      const safePath = validatePath(UPLOAD_DIR, filename);
+      const buffer = fs.readFileSync(safePath);
       images.set(filename, buffer);
     }
 
     return images;
   }
 
-  setProcessedResults(results: ProcessedResult[]) {
-    // Clear old processed files
-    const files = fs.readdirSync(PROCESSED_DIR);
-    files.forEach((file) => {
-      fs.unlinkSync(path.join(PROCESSED_DIR, file));
-    });
+  async setProcessedResults(results: ProcessedResult[]): Promise<void> {
+    const release = await this.acquireLock();
+    try {
+      // Clear old processed files
+      const files = fs.readdirSync(PROCESSED_DIR);
+      files.forEach((file) => {
+        const safePath = validatePath(PROCESSED_DIR, file);
+        fs.unlinkSync(safePath);
+      });
 
-    // Save new processed results
-    for (const result of results) {
-      fs.writeFileSync(
-        path.join(PROCESSED_DIR, result.filename),
-        result.imageData
-      );
-      fs.writeFileSync(
-        path.join(PROCESSED_DIR, result.filename.replace(/\.[^.]+$/, ".txt")),
-        result.caption
-      );
+      // Save new processed results
+      for (const result of results) {
+        const imagePathSafe = validatePath(PROCESSED_DIR, result.filename);
+        const txtFilename = result.filename.replace(/\.[^.]+$/, ".txt");
+        const txtPathSafe = validatePath(PROCESSED_DIR, txtFilename);
+
+        fs.writeFileSync(imagePathSafe, result.imageData);
+        fs.writeFileSync(txtPathSafe, result.caption);
+      }
+    } finally {
+      release();
     }
   }
 
@@ -73,9 +119,12 @@ class Store {
 
     for (const imageFile of imageFiles) {
       const txtFile = imageFile.replace(/\.[^.]+$/, ".txt");
-      const imageData = fs.readFileSync(path.join(PROCESSED_DIR, imageFile));
-      const caption = fs.existsSync(path.join(PROCESSED_DIR, txtFile))
-        ? fs.readFileSync(path.join(PROCESSED_DIR, txtFile), "utf-8")
+      const imagePathSafe = validatePath(PROCESSED_DIR, imageFile);
+      const txtPathSafe = validatePath(PROCESSED_DIR, txtFile);
+
+      const imageData = fs.readFileSync(imagePathSafe);
+      const caption = fs.existsSync(txtPathSafe)
+        ? fs.readFileSync(txtPathSafe, "utf-8")
         : "";
 
       results.push({
@@ -90,7 +139,16 @@ class Store {
 
   addLog(message: string) {
     const timestamp = new Date().toLocaleTimeString();
-    const logLine = `[${timestamp}] ${message}\n`;
+
+    // Sanitize message to prevent log injection
+    // Remove control characters, newlines, and carriage returns
+    const sanitizedMessage = message
+      .replace(/[\r\n\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, '') // Remove control chars
+      .replace(/\s+/g, ' ') // Collapse multiple spaces
+      .trim()
+      .substring(0, 1000); // Limit length to prevent log bloat
+
+    const logLine = `[${timestamp}] ${sanitizedMessage}\n`;
 
     if (!fs.existsSync(LOGS_FILE)) {
       fs.writeFileSync(LOGS_FILE, logLine);
@@ -109,6 +167,72 @@ class Store {
   clearLogs() {
     if (fs.existsSync(LOGS_FILE)) {
       fs.unlinkSync(LOGS_FILE);
+    }
+  }
+
+  // Cleanup old files (useful for preventing disk space issues)
+  async cleanupOldFiles(maxAgeDays: number = 7): Promise<void> {
+    const release = await this.acquireLock();
+    try {
+      const now = Date.now();
+      const maxAgeMs = maxAgeDays * 24 * 60 * 60 * 1000;
+
+      // Clean upload directory
+      const uploadFiles = fs.readdirSync(UPLOAD_DIR);
+      uploadFiles.forEach((file) => {
+        const safePath = validatePath(UPLOAD_DIR, file);
+        const stats = fs.statSync(safePath);
+        if (now - stats.mtimeMs > maxAgeMs) {
+          fs.unlinkSync(safePath);
+        }
+      });
+
+      // Clean processed directory
+      const processedFiles = fs.readdirSync(PROCESSED_DIR);
+      processedFiles.forEach((file) => {
+        const safePath = validatePath(PROCESSED_DIR, file);
+        const stats = fs.statSync(safePath);
+        if (now - stats.mtimeMs > maxAgeMs) {
+          fs.unlinkSync(safePath);
+        }
+      });
+
+      // Clean old logs if they exist and are old
+      if (fs.existsSync(LOGS_FILE)) {
+        const stats = fs.statSync(LOGS_FILE);
+        if (now - stats.mtimeMs > maxAgeMs) {
+          fs.unlinkSync(LOGS_FILE);
+        }
+      }
+    } finally {
+      release();
+    }
+  }
+
+  // Clear all files immediately (for manual cleanup)
+  async clearAll(): Promise<void> {
+    const release = await this.acquireLock();
+    try {
+      // Clear uploads
+      const uploadFiles = fs.readdirSync(UPLOAD_DIR);
+      uploadFiles.forEach((file) => {
+        const safePath = validatePath(UPLOAD_DIR, file);
+        fs.unlinkSync(safePath);
+      });
+
+      // Clear processed
+      const processedFiles = fs.readdirSync(PROCESSED_DIR);
+      processedFiles.forEach((file) => {
+        const safePath = validatePath(PROCESSED_DIR, file);
+        fs.unlinkSync(safePath);
+      });
+
+      // Clear logs
+      if (fs.existsSync(LOGS_FILE)) {
+        fs.unlinkSync(LOGS_FILE);
+      }
+    } finally {
+      release();
     }
   }
 }
